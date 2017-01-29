@@ -1,7 +1,8 @@
 #include <vector>
 #include <set>
 
-#define TP_NOT_ZERO(v) (fabs(v) > 0.00001f)
+#define TP_EPSILON 0.00001f
+#define TP_NOT_ZERO(v) (fabsf(v) > TP_EPSILON)
 
 #define TP_CPP_THREADS
 #define TP_NUM_THREADS 8
@@ -354,92 +355,29 @@ static int tp_texel_binary_search(texel_t *texels, int n, texel_t toFind)
 	}
 }
 
-#ifdef TP_CPP_THREADS
-typedef struct
-{
-	const float *A;
-	float *AtA;
-	const int *sparseIndices;
-	int maxRowIndices;
-	int m, n;
-	int inc;
-} tp_matrix_At_times_A_data;
-
-static void tp_matrix_At_times_A_lower_left(tp_matrix_At_times_A_data *data, int index)
-{
-	if (!data->sparseIndices || !data->maxRowIndices)
-	{
-		for (int k = 0; k < data->m; k++)
-		{
-			const float *srcPtr = data->A + k * data->n;
-			for (int i = index; i < data->n; i += data->inc)
-			{
-				float v = data->A[k * data->n + i];
-				if (TP_NOT_ZERO(v))
-				{
-					float *dstPtr = data->AtA + i * data->n;
-					for (int j = 0; j <= i; j++, srcPtr++, dstPtr++)
-						(*dstPtr) += v * (*srcPtr);
-				}
-			}
-		}
-	}
-	else
-	{
-		for (int k = 0; k < data->m; k++)
-		{
-			const float *srcPtr = data->A + k * data->n;
-			const int *indexPtr = data->sparseIndices + k * data->maxRowIndices;
-			for (int i = index; i < data->n; i += data->inc)
-			{
-				float v = data->A[k * data->n + i];
-				if (TP_NOT_ZERO(v))
-				{
-					float *dstPtr = data->AtA + i * data->n;
-					for (int j = 0; j < data->maxRowIndices; j++)
-					{
-						int index = indexPtr[j];
-						if (index < 0) break;
-						dstPtr[index] += v * srcPtr[index];
-					}
-				}
-			}
-		}
-	}
-}
-#endif
-
-static void tp_matrix_At_times_A(const float *A, int m, int n, float *AtA, const int *sparseIndices = 0, int maxRowIndices = 0)
+static void tp_matrix_At_times_A(const float *A, int m, int n, float *AtA, const int *sparseIndices, int maxRowIndices)
 {
 	//if (!AtAisZero)
 	//	memset(AtA, 0, n * n * sizeof(float));
 
 	// compute lower left triangle only since the result is symmetric
-	tp_matrix_At_times_A_data data;
-	data.A = A;
-	data.AtA = AtA;
-	data.sparseIndices = sparseIndices;
-	data.maxRowIndices = maxRowIndices;
-	data.m = m;
-	data.n = n;
-
-#if 0 //def TP_CPP_THREADS
-	if (n >= 256 * TP_NUM_THREADS)
+	for (int k = 0; k < m; k++)
 	{
-		data.inc = TP_NUM_THREADS;
-
-		std::thread threads[TP_NUM_THREADS];
-		for (int i = 0; i < TP_NUM_THREADS; i++)
-			threads[i] = std::thread(tp_matrix_At_times_A_lower_left, &data, i);
-
-		for (int i = 0; i < TP_NUM_THREADS; i++)
-			threads[i].join();
-	}
-	else
-#endif
-	{
-		data.inc = 1;
-		tp_matrix_At_times_A_lower_left(&data, 0);
+		const float *srcPtr = A + k * maxRowIndices;
+		const int *indexPtr = sparseIndices + k * maxRowIndices;
+		for (int i = 0; i < maxRowIndices; i++)
+		{
+			int index_i = indexPtr[i];
+			if (index_i < 0) break;
+			float v = srcPtr[i];
+			float *dstPtr = AtA + index_i * n;
+			for (int j = 0; j < maxRowIndices; j++)
+			{
+				int index_j = indexPtr[j];
+				if (index_j < 0) break;
+				dstPtr[index_j] += v * srcPtr[j];
+			}
+		}
 	}
 
 	// mirror lower left triangle to upper right
@@ -448,26 +386,17 @@ static void tp_matrix_At_times_A(const float *A, int m, int n, float *AtA, const
 	//		AtA[j * n + i] = AtA[i * n + j];
 }
 
-static void tp_matrix_At_times_b(const float *A, int m, int n, const float *b, float *Atb, const int *sparseIndices = 0, int maxRowIndices = 0)
+static void tp_matrix_At_times_b(const float *A, int m, int n, const float *b, float *Atb, const int *sparseIndices, int maxRowIndices)
 {
 	memset(Atb, 0, sizeof(float) * n);
-	if (!sparseIndices || !maxRowIndices)
+	for (int j = 0; j < m; j++)
 	{
-		for (int j = 0; j < m; j++)
-			for (int i = 0; i < n; i++)
-				Atb[i] += A[j * n + i] * b[j];
-	}
-	else
-	{
-		for (int j = 0; j < m; j++)
+		const int *rowIndices = sparseIndices + j * maxRowIndices;
+		for (int i = 0; i < maxRowIndices; i++)
 		{
-			const int *rowIndices = sparseIndices + j * maxRowIndices;
-			for (int i = 0; i < maxRowIndices; i++)
-			{
-				int index = rowIndices[i];
-				if (index < 0) break;
-				Atb[index] += A[j * n + index] * b[j];
-			}
+			int index = rowIndices[i];
+			if (index < 0) break;
+			Atb[index] += A[j * maxRowIndices + i] * b[j];
 		}
 	}
 }
@@ -526,7 +455,6 @@ static bool tp_matrix_cholesky_prepare(const float *A, int n, float *L, int *spa
 			if (i == j)
 			{
 				if (sum <= 0.0) return false;
-				//_mm_store_ss(invDiag + i, _mm_rsqrt_ss(_mm_load_ss(&sum))); // invDiag[i] = 1.0f / sqrtf(sum)
 				invDiag[i] = tp_rsqrtf(sum);
 			}
 
@@ -631,7 +559,7 @@ static void tp_optimize_seam(tp_seams_t *data, int setIndex)
 		n += 8 - (n & 7);
 
 	std::vector<texel_t> texelsFlat(texels.begin(), texels.end());
-	float *A = tp_alloc(float, (m + n) * n);
+	float *A = tp_alloc(float, (m + n) * 8);
 	int *AsparseIndices = tp_alloc(int, (m + n) * 8);
 
 	size_t r = 0;
@@ -662,9 +590,9 @@ static void tp_optimize_seam(tp_seams_t *data, int setIndex)
 		{
 			for (int k = 0; k < 4; k++)
 			{
-				A[r * n + column0[k]] = stitchingPoints[i].sides[0].weights[k];
+				A[r * 8 + k * 2 + 0] = stitchingPoints[i].sides[0].weights[k];
 				AsparseIndices[r * 8 + k * 2 + 0] = column0[k];
-				A[r * n + column1[k]] = -stitchingPoints[i].sides[1].weights[k];
+				A[r * 8 + k * 2 + 1] = -stitchingPoints[i].sides[1].weights[k];
 				AsparseIndices[r * 8 + k * 2 + 1] = column1[k];
 			}
 			r++;
@@ -676,7 +604,7 @@ static void tp_optimize_seam(tp_seams_t *data, int setIndex)
 	// add error terms for deviation from original pixel value (scaled by lambda)
 	for (int i = 0; i < n; i++)
 	{
-		A[(m + i) * n + i] = data->lambda;
+		A[(m + i) * 8] = data->lambda;
 		AsparseIndices[(m + i) * 8 + 0] = i;
 		AsparseIndices[(m + i) * 8 + 1] = -1;
 	}
