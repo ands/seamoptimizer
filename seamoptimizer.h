@@ -69,16 +69,19 @@ static inline float    so_length3sq (so_vec3 a           ) { return a.x * a.x + 
 static inline float    so_length3   (so_vec3 a           ) { return sqrtf(so_length3sq(a)); }
 static inline so_vec3  so_normalize3(so_vec3 a           ) { return so_div3(a, so_length3(a)); }
 
-//#define SO_CHECK_FOR_MEMORY_LEAKS // check for memory leaks. don't use this in multithreaded code!
+#define SO_CHECK_FOR_MEMORY_LEAKS // check for memory leaks. don't use this in multithreaded code!
 
 #ifdef SO_CHECK_FOR_MEMORY_LEAKS
 static uint64_t so_allocated = 0;
+static uint64_t so_allocated_max = 0;
 
 static void *so_alloc_void(size_t size)
 {
 	void *memory = SO_CALLOC(1, size + sizeof(size_t));
 	(*(size_t*)memory) = size;
 	so_allocated += size;
+	if (so_allocated > so_allocated_max)
+		so_allocated_max = so_allocated;
 	return (size_t*)memory + 1;
 }
 static void so_free(void *memory)
@@ -523,10 +526,146 @@ static int so_texel_binary_search(texel_t *texels, int n, texel_t toFind)
 	}
 }
 
-static void so_matrix_At_times_A(const float *A, int m, int n, float *AtA, const int *sparseIndices, int maxRowIndices)
+typedef struct
 {
-	//if (!AtAisZero)
-	//	memset(AtA, 0, n * n * sizeof(float));
+	int index;
+	float value;
+} so_sparse_entry_t;
+
+static int so_sparse_entry_cmp(const void *a, const void *b)
+{
+	so_sparse_entry_t *ae = (so_sparse_entry_t*)a;
+	so_sparse_entry_t *be = (so_sparse_entry_t*)b;
+	return ae->index - be->index;
+}
+
+typedef struct
+{
+	so_sparse_entry_t *entries;
+	int count;
+	int capacity;
+} so_sparse_entries_t;
+
+static void so_sparse_matrix_alloc(so_sparse_entries_t *matrix, int capacity)
+{
+	matrix->entries = so_alloc(so_sparse_entry_t, capacity);
+	matrix->capacity = capacity;
+	matrix->count = 0;
+}
+
+static void so_sparse_matrix_free(so_sparse_entries_t *matrix)
+{
+	so_free(matrix->entries);
+	*matrix = { 0 };
+}
+
+static void so_sparse_matrix_add(so_sparse_entries_t *matrix, int index, float value)
+{
+	if (matrix->count == matrix->capacity)
+	{
+		int newCapacity = matrix->capacity * 2;
+		if (newCapacity < 64)
+			newCapacity = 64;
+		so_sparse_entry_t *newEntries = so_alloc(so_sparse_entry_t, newCapacity);
+		for (int i = 0; i < matrix->count; i++)
+			newEntries[i] = matrix->entries[i];
+		so_free(matrix->entries);
+		matrix->entries = newEntries;
+		matrix->capacity = newCapacity;
+	}
+
+	int entryIndex = matrix->count++;
+	matrix->entries[entryIndex].index = index;
+	matrix->entries[entryIndex].value = value;
+}
+
+static void so_sparse_matrix_add(so_sparse_entries_t *matrix, so_sparse_entry_t *entry)
+{
+	so_sparse_matrix_add(matrix, entry->index, entry->value);
+}
+
+static void so_sparse_matrix_sort(so_sparse_entries_t *matrix)
+{
+	qsort(matrix->entries, matrix->count, sizeof(so_sparse_entry_t), so_sparse_entry_cmp);
+}
+
+static bool so_sparse_matrix_advance_to_index(so_sparse_entries_t *matrix, int *position, int index, float *outValue)
+{
+	int localPosition = *position;
+	while (localPosition < matrix->count && matrix->entries[localPosition].index < index)
+		++localPosition;
+	*position = localPosition;
+
+	if (localPosition < matrix->count && matrix->entries[localPosition].index == index)
+	{
+		*outValue = matrix->entries[localPosition].value;
+		return true;
+	}
+
+	return false;
+}
+
+static inline uint32_t so_sparse_entry_hash(int entryIndex, uint32_t capacity)
+{
+	return (entryIndex * 104173) % capacity;
+}
+
+static void so_sparse_entry_set_alloc(so_sparse_entries_t *set, int capacity)
+{
+	set->entries = so_alloc(so_sparse_entry_t, capacity);
+	for (int i = 0; i < capacity; i++)
+		set->entries[i].index = -1;
+	set->capacity = capacity;
+	set->count = 0;
+}
+
+static so_sparse_entry_t *so_sparse_entry_set_get_or_add(so_sparse_entries_t *set, int index)
+{
+	if (set->count + 1 > set->capacity * 3 / 4) // leave some free space to avoid having many collisions
+	{
+		int newCapacity = set->capacity >= 64 ? set->capacity * 2 : 64;
+		so_sparse_entry_t *newEntries = so_alloc(so_sparse_entry_t, newCapacity);
+		for (int i = 0; i < newCapacity; i++)
+			newEntries[i].index = -1;
+
+		for (int i = 0; i < set->capacity; i++) // rehash all old entries
+		{
+			if (set->entries[i].index != -1)
+			{
+				uint32_t hash = so_sparse_entry_hash(set->entries[i].index, newCapacity);
+				while (newEntries[hash].index != -1) // collisions
+					hash = (hash + 1) % newCapacity;
+				newEntries[hash] = set->entries[i];
+			}
+		}
+		so_free(set->entries);
+		set->entries = newEntries;
+		set->capacity = newCapacity;
+	}
+
+	uint32_t hash = so_sparse_entry_hash(index, set->capacity);
+	while (set->entries[hash].index != -1) // collisions
+	{
+		if (set->entries[hash].index == index)
+			return &set->entries[hash]; // entry is already in the set
+		hash = (hash + 1) % set->capacity;
+	}
+
+	if (set->entries[hash].index == -1) // make new entry
+	{
+		set->entries[hash].index = index;
+		set->entries[hash].value = 0.0f;
+		set->count++;
+		return &set->entries[hash];
+	}
+
+	return 0; // shouldn't happen
+}
+
+static so_sparse_entries_t so_matrix_At_times_A(const float *A, const int *sparseIndices, int maxRowIndices, int m, int n)
+{
+	so_sparse_entries_t AtA;
+	so_sparse_entry_set_alloc(&AtA, (n / 16) * (n / 16));
 
 	// compute lower left triangle only since the result is symmetric
 	for (int k = 0; k < m; k++)
@@ -538,20 +677,29 @@ static void so_matrix_At_times_A(const float *A, int m, int n, float *AtA, const
 			int index_i = indexPtr[i];
 			if (index_i < 0) break;
 			float v = srcPtr[i];
-			float *dstPtr = AtA + index_i * n;
+			//float *dstPtr = AtA + index_i * n;
 			for (int j = 0; j < maxRowIndices; j++)
 			{
 				int index_j = indexPtr[j];
 				if (index_j < 0) break;
-				dstPtr[index_j] += v * srcPtr[j];
+				//dstPtr[index_j] += v * srcPtr[j];
+				int index = index_i * n + index_j;
+
+				so_sparse_entry_t *entry = so_sparse_entry_set_get_or_add(&AtA, index);
+				entry->value += v * srcPtr[j];
 			}
 		}
 	}
 
-	// mirror lower left triangle to upper right
-	//for (int i = 0; i < n; i++)
-	//	for (int j = 0; j < i; j++)
-	//		AtA[j * n + i] = AtA[i * n + j];
+	// compaction step (make a compact array from the scattered hash set values)
+	for (int i = 0, j = 0; i < AtA.capacity; i++)
+		if (AtA.entries[i].index != -1)
+			AtA.entries[j++] = AtA.entries[i];
+
+	// sort by index -> this is a sparse matrix now
+	so_sparse_matrix_sort(&AtA);
+
+	return AtA;
 }
 
 static void so_matrix_At_times_b(const float *A, int m, int n, const float *b, float *Atb, const int *sparseIndices, int maxRowIndices)
@@ -569,7 +717,7 @@ static void so_matrix_At_times_b(const float *A, int m, int n, const float *b, f
 	}
 }
 
-static bool so_matrix_cholesky_prepare(const float *A, int n, float *L, int *sparseIndicesOut = 0)
+static so_sparse_entries_t so_matrix_cholesky_prepare(so_sparse_entries_t *AtA, int n)
 {
 	// dense
 	//for (int i = 0; i < n; i++)
@@ -593,111 +741,90 @@ static bool so_matrix_cholesky_prepare(const float *A, int n, float *L, int *spa
 	//}
 	
 	// sparse
-	int *indices_i = sparseIndicesOut;
-	if (!indices_i)
-		indices_i = (int*)alloca(sizeof(int) * n);
-	int *colCounts = (int*)alloca(sizeof(int) * n);
+	int *indices_i = (int*)alloca(sizeof(int) * n);
+	float *row_i = (float*)alloca(sizeof(float) * n);
 	float *invDiag = (float*)alloca(sizeof(float) * n);
+
+	so_sparse_entries_t L;
+	so_sparse_matrix_alloc(&L, (n / 16) * (n / 16));
+
+	int AtAindex = 0;
 	for (int i = 0; i < n; i++)
 	{
-		float *a = L + i * n;
 		int index_i_count = 0;
-		colCounts[i] = 0;
+
+		int row_j_index = 0;
 		for (int j = 0; j <= i; j++)
 		{
-			float *b = L + j * n;
-			float sum = A[i * n + j]; // + (i == j ? 0.0001 : 0.0); // regularization
+			//float sum = A[i * n + j]; // + (i == j ? 0.0001 : 0.0); // regularization
+			int index = i * n + j;
+			float sum = 0.0f;
+			so_sparse_matrix_advance_to_index(AtA, &AtAindex, index, &sum);
+
 			for (int k = 0; k < index_i_count; k++)
 			{
 				int index_i = indices_i[k];
-				sum -= a[index_i] * b[index_i];
+				float Lvalue;
+				if (so_sparse_matrix_advance_to_index(&L, &row_j_index, j * n + index_i, &Lvalue))
+					sum -= row_i[index_i] * Lvalue;
 			}
 
 			if (i == j)
 			{
-				if (sum <= 0.0f) return false;
+				if (sum <= 0.0f)
+				{
+					so_sparse_matrix_free(&L);
+					return L;
+				}
 				invDiag[i] = so_rsqrtf(sum);
 			}
 
 			if (SO_NOT_ZERO(sum))
 			{
-				a[j] = sum * invDiag[j];
+				row_i[j] = sum * invDiag[j];
 				indices_i[index_i_count++] = j;
-				if (sparseIndicesOut && i != j)
-				{
-					int indexCol = colCounts[j]++;
-					sparseIndicesOut[j * n + n - 1 - indexCol] = i;
-				}
+				so_sparse_matrix_add(&L, index, row_i[j]);
 			}
 			else
-				a[j] = 0.0f;
-		}
-		if (sparseIndicesOut)
-		{
-			if (index_i_count)
-				indices_i[--index_i_count] = -1;
-			else
-				indices_i[0] = -1;
-			indices_i += n;
+				row_i[j] = 0.0f;
 		}
 	}
 
-	if (sparseIndicesOut)
-	{
-		for (int i = 0; i < n; i++)
-			sparseIndicesOut[i * n + n - 1 - colCounts[i]] = -1;
-	}
-	return true;
+	return L;
 }
 
-static void so_matrix_cholesky_solve(const float *L, float *x, const float *b, int n, const int *LsparseIndices = 0)
+static void so_matrix_cholesky_solve(so_sparse_entries_t *Lrows, so_sparse_entries_t *Lcols, float *x, const float *b, int n)
 {
-	float *y = (float*)alloca(sizeof(float) * n); // TODO
+	float *y = (float*)alloca(sizeof(float) * n);
 
 	// L * y = b
+	int Lindex = 0;
 	for (int i = 0; i < n; i++)
 	{
 		float sum = b[i];
-		const float *row = L + i * n;
-		if (LsparseIndices)
+		while (Lindex < Lrows->count && Lrows->entries[Lindex].index < i * (n + 1))
 		{
-			const int *rowIndices = LsparseIndices + i * n;
-			for (int j = 0; j < i; j++)
-			{
-				int index = rowIndices[j];
-				if (index < 0) break;
-				sum -= row[index] * y[index];
-			}
+			sum -= Lrows->entries[Lindex].value * y[Lrows->entries[Lindex].index - i * n];
+			++Lindex;
 		}
-		else
-		{
-			for (int j = 0; j < i; j++)
-				sum -= row[j] * y[j];
-		}
-		y[i] = sum / row[i];
+		assert(Lrows->entries[Lindex].index == i * (n + 1));
+		y[i] = sum / Lrows->entries[Lindex].value;
+		++Lindex;
 	}
 
 	// L' * x = y
+	Lindex = Lcols->count - 1;
 	for (int i = n - 1; i >= 0; i--)
 	{
 		float sum = y[i];
-		const float *col = L + i;
-		if (LsparseIndices)
+		while (Lindex >= 0 && Lcols->entries[Lindex].index > i * (n + 1))
 		{
-			const int *colIndices = LsparseIndices + i * n + n - 1;
-			for (int j = 0; true; j--)
-			{
-				int index = colIndices[j];
-				if (index < 0) break;
-				sum -= col[index * n] * x[index];
-			}
+			sum -= Lcols->entries[Lindex].value * x[Lcols->entries[Lindex].index - i * n];
+			--Lindex;
 		}
-		else
-		{
-			for (int j = n - 1; j > i; j--)
-				sum -= col[j * n] * x[j];
-		}
-		x[i] = sum / col[i * n];
+		assert(Lcols->entries[Lindex].index == i * (n + 1));
+		x[i] = sum / Lcols->entries[Lindex].value;
+		--Lindex;
 	}
 }
 
@@ -707,7 +834,6 @@ typedef struct
 	int w, h, c;
 	float *data;
 } so_seams_t;
-
 
 static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 {
@@ -721,9 +847,6 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 		sizeof(texel_t) * n +
 		sizeof(float) * (m + n) * 8 +
 		sizeof(int) * (m + n) * 8 +
-		sizeof(float) * n * n +
-		sizeof(float) * n * n + 
-		sizeof(int) * n * n +
 		sizeof(float) * (m + n) +
 		sizeof(float) * n +
 		sizeof(float) * n);
@@ -739,39 +862,14 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 	int *AsparseIndices = (int*)memoryStart;
 	memoryStart += sizeof(int) * (m + n) * 8;
 
-
-	float *AtA = (float*)memoryStart;
-	memoryStart += sizeof(float) * n * n;
-
-
-	float *L = (float*)memoryStart;
-	memoryStart += sizeof(float) * n * n;
-
-
-	int *LsparseIndices = (int*)memoryStart;
-	memoryStart += sizeof(int) * n * n;
-
-
 	float *b = (float*)memoryStart;
 	memoryStart += sizeof(float) * (m + n);
-
 
 	float *Atb = (float*)memoryStart;
 	memoryStart += sizeof(float) * n;
 
-
 	float *x = (float*)memoryStart;
 	memoryStart += sizeof(float) * n;
-
-	/*texel_t *texelsFlat = so_alloc(texel_t, n);
-	float *A = so_alloc(float, (m + n) * 8);
-	int *AsparseIndices = so_alloc(int, (m + n) * 8);
-	float *AtA = so_alloc(float, n * n);
-	float *L = so_alloc(float, n * n);
-	int *LsparseIndices = so_alloc(int, n * n);
-	float *b = so_alloc(float, m + n);
-	float *Atb = so_alloc(float, n);
-	float *x = so_alloc(float, n);*/
 
 	for (int i = 0, j = 0; i < texels->capacity && j < n; i++)
 		if (texels->texels[i].x != -1)
@@ -826,20 +924,23 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 		AsparseIndices[(m + i) * 8 + 1] = -1;
 	}
 
-	so_matrix_At_times_A(A, m + n, n, AtA, AsparseIndices, 8);
+	so_sparse_entries_t AtA = so_matrix_At_times_A(A, AsparseIndices, 8, m + n, n);
+	so_sparse_entries_t L = so_matrix_cholesky_prepare(&AtA, n);
+	so_sparse_matrix_free(&AtA);
 
-	if (!so_matrix_cholesky_prepare(AtA, n, L, LsparseIndices))
+	if (!L.count)
 	{
 		printf("Could not compute cholesky decomposition.\n");
 		so_free(memoryBlock);
-		/*so_free(texelsFlat);
-		so_free(A);
-		so_free(AsparseIndices);
-		so_free(AtA);
-		so_free(L);
-		so_free(LsparseIndices);*/
+		so_sparse_matrix_free(&L);
 		return;
 	}
+
+	so_sparse_entries_t Lcols;
+	so_sparse_matrix_alloc(&Lcols, L.count);
+	for (int i = 0; i < L.count; i++)
+		so_sparse_matrix_add(&Lcols, (L.entries[i].index % n) * n + (L.entries[i].index / n), L.entries[i].value);
+	so_sparse_matrix_sort(&Lcols);
 
 	// solve each color channel independently
   	for (int ci = 0; ci < data->c; ci++)
@@ -848,7 +949,7 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 			b[m + i] = data->lambda * data->data[(texelsFlat[i].y * data->w + texelsFlat[i].x) * data->c + ci];
 
 		so_matrix_At_times_b(A, m + n, n, b, Atb, AsparseIndices, 8);
-		so_matrix_cholesky_solve(L, x, Atb, n, LsparseIndices);
+		so_matrix_cholesky_solve(&L, &Lcols, x, Atb, n);
 
 		// write out results
 		for (int i = 0; i < n; i++)
@@ -856,15 +957,8 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 	}
 
 	so_free(memoryBlock);
-	/*so_free(x);
-	so_free(Atb);
-	so_free(b);
-	so_free(L);
-	so_free(LsparseIndices);
-	so_free(AtA);
-	so_free(A);
-	so_free(AsparseIndices);
-	so_free(texelsFlat);*/
+	so_sparse_matrix_free(&L);
+	so_sparse_matrix_free(&Lcols);
 }
 
 static void so_optimize_seams(float *positions, float *texcoords, int vertices, float *data, int w, int h, int c, float lambda)
@@ -911,6 +1005,7 @@ static void so_optimize_seams(float *positions, float *texcoords, int vertices, 
 				//	so_connected_sets_add_seam(&connectedSets, uv[i0], uv[i2], uv[oi0], uv[oi1], data, w, h, c);
 				else if (SO_EQUAL(oi2, i1) && so_should_optimize(pos + tri, pos + otri))
 					so_connected_sets_add_seam(&connectedSets, uv[i0], uv[i1], uv[oi0], uv[oi2], data, w, h, c);
+				//break;
 			}
 			if (++hash == vertices * 2)
 				hash = 0;
@@ -960,5 +1055,7 @@ static void so_optimize_seams(float *positions, float *texcoords, int vertices, 
 
 #ifdef SO_CHECK_FOR_MEMORY_LEAKS
 	assert(so_allocated == 0);
+	printf("allocated max %dMB\n", so_allocated_max / (1024 * 1024));
+	so_allocated_max = 0;
 #endif
 }
