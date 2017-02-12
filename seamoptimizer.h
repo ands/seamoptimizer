@@ -1,3 +1,41 @@
+/***********************************************************
+* A single header file lightmap seam optimization library  *
+* https://github.com/ands/seamoptimizer                    *
+* no warranty implied | use at your own risk               *
+* author: Andreas Mantler (ands) | last change: 12.02.2017 *
+*                                                          *
+* License:                                                 *
+* This software is in the public domain.                   *
+* Where that dedication is not recognized,                 *
+* you are granted a perpetual, irrevocable license to copy *
+* and modify this file however you want.                   *
+***********************************************************/
+
+#ifndef SEAMOPTIMIZER_H
+#define SEAMOPTIMIZER_H
+
+typedef struct so_seam_t so_seam_t;
+
+so_seam_t *so_seams_find(
+	float *positions, float *texcoords, int vertices, float cosNormalThreshold,
+	float *data, int w, int h, int c);
+
+bool so_seam_optimize(
+	so_seam_t *seam,
+	float *data, int w, int h, int c,
+	float lambda);
+
+so_seam_t *so_seam_next(
+	so_seam_t *seam);
+
+void so_seams_free(
+	so_seam_t *seams);
+
+#endif
+////////////////////// END OF HEADER //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#ifdef SEAMOPTIMIZER_IMPLEMENTATION
+#undef SEAMOPTIMIZER_IMPLEMENTATION
+
 #include <stdlib.h> // qsort
 #include <stdio.h> // printf (TODO)
 #include <string.h> // memcpy
@@ -11,12 +49,6 @@
 #define SO_CALLOC calloc
 #define SO_FREE free
 #endif
-
-//#define SO_CPP_THREADS
-//#define SO_NUM_THREADS 8
-//#ifdef SO_CPP_THREADS
-//#include <thread>
-//#endif
 
 
 #define SO_EPSILON 0.00001f
@@ -164,15 +196,15 @@ static void so_fill_with_closest(int x, int y, float *data, int w, int h, int c,
 	}
 }
 
-struct texel_t
+typedef struct
 {
 	int16_t x, y;
-};
+} so_texel_t;
 
 static inline int so_texel_cmp(const void *l, const void *r)
 {
-	const texel_t *lt = (const texel_t*)l;
-	const texel_t *rt = (const texel_t*)r;
+	const so_texel_t *lt = (const so_texel_t*)l;
+	const so_texel_t *rt = (const so_texel_t*)r;
 	if (lt->y < rt->y) return -1;
 	if (lt->y > rt->y) return 1;
 	if (lt->x < rt->x) return -1;
@@ -180,29 +212,30 @@ static inline int so_texel_cmp(const void *l, const void *r)
 	return 0;
 }
 
-struct bilinear_sample_t
+typedef struct
 {
-	texel_t texels[4];
+	so_texel_t texels[4];
 	float weights[4];
-};
-struct stitching_point_t
-{
-	bilinear_sample_t sides[2];
-};
+} so_bilinear_sample_t;
 
-struct texel_set_t
+typedef struct
 {
-	texel_t *texels;
+	so_bilinear_sample_t sides[2];
+} so_stitching_point_t;
+
+typedef struct 
+{
+	so_texel_t *texels;
 	uint32_t count;
 	uint32_t capacity;
-};
+} so_texel_set_t;
 
-static inline uint32_t so_texel_hash(texel_t texel, uint32_t capacity)
+static inline uint32_t so_texel_hash(so_texel_t texel, uint32_t capacity)
 {
 	return (texel.y * 104173 + texel.x * 86813) % capacity;
 }
 
-static void so_texel_set_add(texel_set_t *set, texel_t *texels, int entries, int arrayLength = 0)
+static void so_texel_set_add(so_texel_set_t *set, so_texel_t *texels, int entries, int arrayLength = 0)
 {
 	if (set->count + entries > set->capacity * 3 / 4) // leave some free space to avoid having many collisions
 	{
@@ -210,7 +243,7 @@ static void so_texel_set_add(texel_set_t *set, texel_t *texels, int entries, int
 		while (set->count + entries > newCapacity * 3 / 4)
 			newCapacity *= 2;
 
-		texel_t *newTexels = so_alloc(texel_t, newCapacity);
+		so_texel_t *newTexels = so_alloc(so_texel_t, newCapacity);
 
 		for (int i = 0; i < newCapacity; i++)
 			newTexels[i].x = -1;
@@ -258,7 +291,7 @@ static void so_texel_set_add(texel_set_t *set, texel_t *texels, int entries, int
 	}
 }
 
-static bool so_texel_set_contains(texel_set_t *set, texel_t texel)
+static bool so_texel_set_contains(so_texel_set_t *set, so_texel_t texel)
 {
 	uint32_t hash = so_texel_hash(texel, set->capacity);
 	while (set->texels[hash].x != -1) // entries with same hash
@@ -270,82 +303,88 @@ static bool so_texel_set_contains(texel_set_t *set, texel_t texel)
 	return false;
 }
 
-static void so_texel_set_free(texel_set_t *set)
+static void so_texel_set_free(so_texel_set_t *set)
 {
 	so_free(set->texels);
 	*set = {0};
 }
 
-struct stitching_points_t
+typedef struct 
 {
-	stitching_point_t *points;
+	so_stitching_point_t *points;
 	uint32_t count;
 	uint32_t capacity;
-};
-static void so_stitching_points_alloc(stitching_points_t *points, uint32_t n)
+} so_stitching_points_t;
+
+static void so_stitching_points_alloc(so_stitching_points_t *points, uint32_t n)
 {
-	points->points = so_alloc(stitching_point_t, n);
+	points->points = so_alloc(so_stitching_point_t, n);
 	points->capacity = n;
 	points->count = 0;
 }
-static void so_stitching_points_free(stitching_points_t *points)
+static void so_stitching_points_free(so_stitching_points_t *points)
 {
 	so_free(points->points);
 	*points = {0};
 }
-static void so_stitching_points_add(stitching_points_t *points, stitching_point_t *point)
+static void so_stitching_points_add(so_stitching_points_t *points, so_stitching_point_t *point)
 {
 	assert(points->count < points->capacity);
 	points->points[points->count++] = *point;
 }
-static void so_stitching_points_append(stitching_points_t *points, stitching_points_t *other)
+static void so_stitching_points_append(so_stitching_points_t *points, so_stitching_points_t *other)
 {
-	stitching_point_t *newPoints = so_alloc(stitching_point_t, points->capacity + other->capacity);
-	memcpy(newPoints, points->points, sizeof(stitching_point_t) * points->count);
-	memcpy(newPoints + points->count, other->points, sizeof(stitching_point_t) * other->count);
+	so_stitching_point_t *newPoints = so_alloc(so_stitching_point_t, points->capacity + other->capacity);
+	memcpy(newPoints, points->points, sizeof(so_stitching_point_t) * points->count);
+	memcpy(newPoints + points->count, other->points, sizeof(so_stitching_point_t) * other->count);
 	so_free(points->points);
 	points->points = newPoints;
 	points->capacity = points->capacity + other->capacity;
 	points->count = points->count + other->count;
 }
 
-struct connected_set_t
+struct so_seam_t
 {
 	int16_t x_min, y_min, x_max, y_max;
-	texel_set_t texels;
-	stitching_points_t stitchingPoints;
-	connected_set_t *next;
+	so_texel_set_t texels;
+	so_stitching_points_t stitchingPoints;
+	so_seam_t *next;
 };
 
-static void so_connected_set_alloc(connected_set_t *set, uint32_t stitchingPointCount)
+so_seam_t *so_seam_next(so_seam_t *seam)
 {
-	so_stitching_points_alloc(&set->stitchingPoints, stitchingPointCount);
-}
-static void so_connected_set_free(connected_set_t *set)
-{
-	so_texel_set_free(&set->texels);
-	so_stitching_points_free(&set->stitchingPoints);
+	return seam->next;
 }
 
-static void so_connected_set_add(connected_set_t *set, stitching_point_t *point)
+static void so_seam_alloc(so_seam_t *seam, uint32_t stitchingPointCount)
+{
+	so_stitching_points_alloc(&seam->stitchingPoints, stitchingPointCount);
+}
+static void so_seam_free(so_seam_t *seam)
+{
+	so_texel_set_free(&seam->texels);
+	so_stitching_points_free(&seam->stitchingPoints);
+}
+
+static void so_seam_add(so_seam_t *seam, so_stitching_point_t *point)
 {
 	for (int side = 0; side < 2; side++)
 	{
 		for (int texel = 0; texel < 4; texel++)
 		{
-			texel_t t = point->sides[side].texels[texel];
-			set->x_min = t.x < set->x_min ? t.x : set->x_min;
-			set->y_min = t.y < set->y_min ? t.y : set->y_min;
-			set->x_max = t.x > set->x_max ? t.x : set->x_max;
-			set->y_max = t.y > set->y_max ? t.y : set->y_max;
+			so_texel_t t = point->sides[side].texels[texel];
+			seam->x_min = t.x < seam->x_min ? t.x : seam->x_min;
+			seam->y_min = t.y < seam->y_min ? t.y : seam->y_min;
+			seam->x_max = t.x > seam->x_max ? t.x : seam->x_max;
+			seam->y_max = t.y > seam->y_max ? t.y : seam->y_max;
 		}
-		so_texel_set_add(&set->texels, point->sides[side].texels, 4);
+		so_texel_set_add(&seam->texels, point->sides[side].texels, 4);
 	}
 
-	so_stitching_points_add(&set->stitchingPoints, point);
+	so_stitching_points_add(&seam->stitchingPoints, point);
 }
 
-static bool so_connected_sets_intersect(connected_set_t *a, connected_set_t *b)
+static bool so_seams_intersect(so_seam_t *a, so_seam_t *b)
 {
 	// compare bounding boxes first
 	if (a->x_min > b->x_max || b->x_min >= a->x_max ||
@@ -355,7 +394,7 @@ static bool so_connected_sets_intersect(connected_set_t *a, connected_set_t *b)
 	// bounds intersect -> check each individual texel for intersection
 	if (a->texels.capacity > b->texels.capacity) // swap so that we always loop over the smaller set
 	{
-		connected_set_t *tmp = a;
+		so_seam_t *tmp = a;
 		a = b;
 		b = tmp;
 	}
@@ -367,7 +406,7 @@ static bool so_connected_sets_intersect(connected_set_t *a, connected_set_t *b)
 	return false;
 }
 
-static void so_connected_sets_in_place_merge(connected_set_t *dst, connected_set_t *src)
+static void so_seams_in_place_merge(so_seam_t *dst, so_seam_t *src)
 {
 	// expand bounding box
 	dst->x_min = src->x_min < dst->x_min ? src->x_min : dst->x_min;
@@ -380,7 +419,7 @@ static void so_connected_sets_in_place_merge(connected_set_t *dst, connected_set
 	so_stitching_points_append(&dst->stitchingPoints, &src->stitchingPoints);
 }
 
-static void so_connected_sets_add_seam(connected_set_t **connectedSets, so_vec2 a0, so_vec2 a1, so_vec2 b0, so_vec2 b1, float *data, int w, int h, int c)
+static void so_seams_add_seam(so_seam_t **seams, so_vec2 a0, so_vec2 a1, so_vec2 b0, so_vec2 b1, float *data, int w, int h, int c)
 {
 	so_vec2 s = so_v2i(w, h);
 	a0 = so_mul2(a0, s);
@@ -393,11 +432,11 @@ static void so_connected_sets_add_seam(connected_set_t **connectedSets, so_vec2 
 	int iterations = (int)(l * 5.0f);
 	float step = 1.0f / iterations;
 
-	connected_set_t currentSet = {0};
-	currentSet.x_min = w; currentSet.y_min = h;
-	currentSet.x_max = 0; currentSet.y_max = 0;
+	so_seam_t currentSeam = {0};
+	currentSeam.x_min = w; currentSeam.y_min = h;
+	currentSeam.x_max = 0; currentSeam.y_max = 0;
 
-	so_connected_set_alloc(&currentSet, iterations + 1);
+	so_seam_alloc(&currentSeam, iterations + 1);
 
 	for (int i = 0; i <= iterations; i++)
 	{
@@ -409,15 +448,15 @@ static void so_connected_sets_add_seam(connected_set_t **connectedSets, so_vec2 
 		float au = a.x - ax, av = a.y - ay, nau = 1.0f - au, nav = 1.0f - av;
 		float bu = b.x - bx, bv = b.y - by, nbu = 1.0f - bu, nbv = 1.0f - bv;
 
-		texel_t ta0 = { ax    , ay     };
-		texel_t ta1 = { ax + 1, ay     };
-		texel_t ta2 = { ax    , ay + 1 };
-		texel_t ta3 = { ax + 1, ay + 1 };
+		so_texel_t ta0 = { ax    , ay     };
+		so_texel_t ta1 = { ax + 1, ay     };
+		so_texel_t ta2 = { ax    , ay + 1 };
+		so_texel_t ta3 = { ax + 1, ay + 1 };
 
-		texel_t tb0 = { bx    , by     };
-		texel_t tb1 = { bx + 1, by     };
-		texel_t tb2 = { bx    , by + 1 };
-		texel_t tb3 = { bx + 1, by + 1 };
+		so_texel_t tb0 = { bx    , by     };
+		so_texel_t tb1 = { bx + 1, by     };
+		so_texel_t tb2 = { bx    , by + 1 };
+		so_texel_t tb3 = { bx + 1, by + 1 };
 
 		so_fill_with_closest(ta0.x, ta0.y, data, w, h, c);
 		so_fill_with_closest(ta1.x, ta1.y, data, w, h, c);
@@ -429,7 +468,7 @@ static void so_connected_sets_add_seam(connected_set_t **connectedSets, so_vec2 
 		so_fill_with_closest(tb2.x, tb2.y, data, w, h, c);
 		so_fill_with_closest(tb3.x, tb3.y, data, w, h, c);
 
-		stitching_point_t sp;
+		so_stitching_point_t sp;
 		sp.sides[0].texels[0] = ta0;
 		sp.sides[0].texels[1] = ta1;
 		sp.sides[0].texels[2] = ta2;
@@ -450,69 +489,130 @@ static void so_connected_sets_add_seam(connected_set_t **connectedSets, so_vec2 
 		sp.sides[1].weights[2] = nbu * bv;
 		sp.sides[1].weights[3] = bu * bv;
 
-		so_connected_set_add(&currentSet, &sp);
+		so_seam_add(&currentSeam, &sp);
 	}
 
-	connected_set_t *dstConnectedSet = 0;
-	for (connected_set_t **connectedSet = connectedSets; *connectedSet; connectedSet = &(*connectedSet)->next)
+	so_seam_t *dstSeam = 0;
+	for (so_seam_t **seam = seams; *seam; seam = &(*seam)->next)
 	{
 		retry:
-		if (so_connected_sets_intersect(&currentSet, *connectedSet))
+		if (so_seams_intersect(&currentSeam, *seam))
 		{
-			if (!dstConnectedSet) // found a set that the edge is connected to -> add current edge to that set
+			if (!dstSeam) // found a seam that the edge is connected to -> add current edge to that seam
 			{
-				so_connected_sets_in_place_merge(*connectedSet, &currentSet);
-				dstConnectedSet = *connectedSet;
+				so_seams_in_place_merge(*seam, &currentSeam);
+				dstSeam = *seam;
 			}
-			else // found another set that the edge is connected to -> merge those sets
+			else // found another seam that the edge is connected to -> merge those seams
 			{
-				so_connected_sets_in_place_merge(dstConnectedSet, *connectedSet);
+				so_seams_in_place_merge(dstSeam, *seam);
 
-				// remove current connectedSet from connectedSets
-				connected_set_t *toDelete = *connectedSet;
-				*connectedSet = (*connectedSet)->next;
-				so_connected_set_free(toDelete);
+				// remove current seam from seams
+				so_seam_t *toDelete = *seam;
+				*seam = (*seam)->next;
+				so_seam_free(toDelete);
 				so_free(toDelete);
-				if (*connectedSet)
-					goto retry; // don't move to next since we already did that by deleting the current set
+				if (*seam)
+					goto retry; // don't move to next since we already did that by deleting the current seam
 				else
 					break;
 			}
 		}
 	}
-	if (!dstConnectedSet) // did not find a set that the edge is connected to -> make a new one
+	if (!dstSeam) // did not find a seam that the edge is connected to -> make a new one
 	{
-		currentSet.next = *connectedSets;
-		*connectedSets = so_alloc(connected_set_t, 1);
-		**connectedSets = currentSet;
+		currentSeam.next = *seams;
+		*seams = so_alloc(so_seam_t, 1);
+		**seams = currentSeam;
 	}
 	else
-		so_connected_set_free(&currentSet);
+		so_seam_free(&currentSeam);
 }
 
-static void so_connected_sets_free(connected_set_t **connectedSets)
+void so_seams_free(so_seam_t *seams)
 {
-	connected_set_t *connectedSet = *connectedSets;
-	while (connectedSet)
+	so_seam_t *seam = seams;
+	while (seam)
 	{
-		connected_set_t *next = connectedSet->next;
-		so_connected_set_free(connectedSet);
-		so_free(connectedSet);
-		connectedSet = next;
+		so_seam_t *next = seam->next;
+		so_seam_free(seam);
+		so_free(seam);
+		seam = next;
 	}
+
+#ifdef SO_CHECK_FOR_MEMORY_LEAKS
+	assert(so_allocated == 0);
+	printf("Allocated max %d MB. Not freed: %d bytes.\n", so_allocated_max / (1024 * 1024), so_allocated);
+	printf("These results are only correct if the lib was used single-threaded.\n");
+	so_allocated_max = 0;
+#endif
 }
 
-static int so_should_optimize(so_vec3 *tria, so_vec3 *trib)
+static int so_should_optimize(so_vec3 *tria, so_vec3 *trib, float cosThreshold)
 {
 	so_vec3 n0 = so_normalize3(so_cross3(so_sub3(tria[1], tria[0]), so_sub3(tria[2], tria[0])));
 	so_vec3 n1 = so_normalize3(so_cross3(so_sub3(trib[1], trib[0]), so_sub3(trib[2], trib[0])));
-	return so_absf(so_dot3(n0, n1)) > 0.99f; // TODO: make threshold an argument!
+	return so_absf(so_dot3(n0, n1)) > cosThreshold;
 }
 
-static int so_texel_binary_search(texel_t *texels, int n, texel_t toFind)
+so_seam_t *so_seams_find(float *positions, float *texcoords, int vertices, float cosNormalThreshold, float *data, int w, int h, int c)
+{
+	so_vec3 *pos = (so_vec3*)positions;
+	so_vec2 *uv = (so_vec2*)texcoords;
+
+	so_vec3 bbmin = so_v3(FLT_MAX, FLT_MAX, FLT_MAX);
+	so_vec3 bbmax = so_v3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+	int *hashmap = so_alloc(int, vertices * 2);
+	for (int i = 0; i < vertices; i++)
+	{
+		bbmin = so_min3(bbmin, pos[i]);
+		bbmax = so_max3(bbmax, pos[i]);
+		hashmap[i * 2 + 0] = -1;
+		hashmap[i * 2 + 1] = -1;
+	}
+
+	so_vec3 bbscale = so_v3(15.9f / bbmax.x, 15.9f / bbmax.y, 15.9f / bbmax.z);
+
+	so_seam_t *seams = 0;
+
+	for (int i0 = 0; i0 < vertices; i0++)
+	{
+		int tri = i0 - (i0 % 3);
+		int i1 = tri + ((i0 + 1) % 3);
+		int i2 = tri + ((i0 + 2) % 3);
+		so_vec3 p = so_mul3(so_sub3(pos[i0], bbmin), bbscale);
+		int hash = (281 * (int)p.x + 569 * (int)p.y + 1447 * (int)p.z) % (vertices * 2);
+		while (hashmap[hash] >= 0)
+		{
+			int oi0 = hashmap[hash];
+#define SO_EQUAL(a, b) so_length3sq(so_sub3(pos[a], pos[b])) < 0.0000001f
+			if (SO_EQUAL(oi0, i0))
+			{
+				int otri = oi0 - (oi0 % 3);
+				int oi1 = otri + ((oi0 + 1) % 3);
+				int oi2 = otri + ((oi0 + 2) % 3);
+				if (SO_EQUAL(oi1, i1) && so_should_optimize(pos + tri, pos + otri, cosNormalThreshold))
+					so_seams_add_seam(&seams, uv[i0], uv[i1], uv[oi0], uv[oi1], data, w, h, c);
+				//else if (SO_EQUAL(oi1, i2) && so_should_optimize(pos + tri, pos + otri, cosNormalThreshold)) // this will already be detected by the other side of the seam!
+				//	so_seams_add_seam(&seams, uv[i0], uv[i2], uv[oi0], uv[oi1], data, w, h, c);
+				else if (SO_EQUAL(oi2, i1) && so_should_optimize(pos + tri, pos + otri, cosNormalThreshold))
+					so_seams_add_seam(&seams, uv[i0], uv[i1], uv[oi0], uv[oi2], data, w, h, c);
+				//break;
+			}
+			if (++hash == vertices * 2)
+				hash = 0;
+		}
+		hashmap[hash] = i0;
+	}
+
+	so_free(hashmap);
+	return seams;
+}
+
+static int so_texel_binary_search(so_texel_t *texels, int n, so_texel_t toFind)
 {
 	int n_half = n / 2;
-	texel_t *center = texels + n_half;
+	so_texel_t *center = texels + n_half;
 	if (toFind.y == center->y && toFind.x == center->x)
 		return n_half;
 	if (n <= 1)
@@ -828,23 +928,16 @@ static void so_matrix_cholesky_solve(so_sparse_entries_t *Lrows, so_sparse_entri
 	}
 }
 
-typedef struct
+bool so_seam_optimize(so_seam_t *seam, float *data, int w, int h, int c, float lambda)
 {
-	float lambda;
-	int w, h, c;
-	float *data;
-} so_seams_t;
-
-static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
-{
-	texel_set_t *texels = &connectedSet->texels;
-	stitching_points_t *stitchingPoints = &connectedSet->stitchingPoints;
+	so_texel_set_t *texels = &seam->texels;
+	so_stitching_points_t *stitchingPoints = &seam->stitchingPoints;
 
 	size_t m = stitchingPoints->count;
 	size_t n = texels->count;
 
 	void *memoryBlock = so_alloc_void(
-		sizeof(texel_t) * n +
+		sizeof(so_texel_t) * n +
 		sizeof(float) * (m + n) * 8 +
 		sizeof(int) * (m + n) * 8 +
 		sizeof(float) * (m + n) +
@@ -853,8 +946,8 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 
 	uint8_t *memoryStart = (uint8_t*)memoryBlock;
 
-	texel_t *texelsFlat = (texel_t*)memoryStart;
-	memoryStart += sizeof(texel_t) * n;
+	so_texel_t *texelsFlat = (so_texel_t*)memoryStart;
+	memoryStart += sizeof(so_texel_t) * n;
 
 	float *A = (float*)memoryStart;
 	memoryStart += sizeof(float) * (m + n) * 8;
@@ -875,7 +968,7 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 		if (texels->texels[i].x != -1)
 			texelsFlat[j++] = texels->texels[i];
 
-	qsort(texelsFlat, n, sizeof(texel_t), so_texel_cmp);
+	qsort(texelsFlat, n, sizeof(so_texel_t), so_texel_cmp);
 
 	size_t r = 0;
 	for (int i = 0; i < m; i++)
@@ -885,8 +978,8 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 		bool side0valid = false, side1valid = false;
 		for (int k = 0; k < 4; k++)
 		{
-			texel_t t0 = stitchingPoints->points[i].sides[0].texels[k];
-			texel_t t1 = stitchingPoints->points[i].sides[1].texels[k];
+			so_texel_t t0 = stitchingPoints->points[i].sides[0].texels[k];
+			so_texel_t t1 = stitchingPoints->points[i].sides[1].texels[k];
 			column0[k] = so_texel_binary_search(texelsFlat, n, t0);
 			column1[k] = so_texel_binary_search(texelsFlat, n, t1);
 
@@ -894,10 +987,10 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 			if (column1[k] == -1) { side1valid = false; break; }
 
 			// test for validity of stitching point
-			for (int ci = 0; ci < data->c; ci++)
+			for (int ci = 0; ci < c; ci++)
 			{
-				side0valid |= data->data[(t0.y * data->w + t0.x) * data->c + ci] > 0.0f;
-				side1valid |= data->data[(t1.y * data->w + t1.x) * data->c + ci] > 0.0f;
+				side0valid |= data[(t0.y * w + t0.x) * c + ci] > 0.0f;
+				side1valid |= data[(t1.y * w + t1.x) * c + ci] > 0.0f;
 			}
 		}
 
@@ -919,7 +1012,7 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 	// add error terms for deviation from original pixel value (scaled by lambda)
 	for (int i = 0; i < n; i++)
 	{
-		A[(m + i) * 8] = data->lambda;
+		A[(m + i) * 8] = lambda;
 		AsparseIndices[(m + i) * 8 + 0] = i;
 		AsparseIndices[(m + i) * 8 + 1] = -1;
 	}
@@ -930,10 +1023,8 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 
 	if (!L.count)
 	{
-		printf("Could not compute cholesky decomposition.\n");
 		so_free(memoryBlock);
-		so_sparse_matrix_free(&L);
-		return;
+		return false; // Cholesky decomposition failed
 	}
 
 	so_sparse_entries_t Lcols;
@@ -943,119 +1034,24 @@ static void so_optimize_seam(so_seams_t *data, connected_set_t *connectedSet)
 	so_sparse_matrix_sort(&Lcols);
 
 	// solve each color channel independently
-  	for (int ci = 0; ci < data->c; ci++)
+  	for (int ci = 0; ci < c; ci++)
 	{
 		for (int i = 0; i < n; i++)
-			b[m + i] = data->lambda * data->data[(texelsFlat[i].y * data->w + texelsFlat[i].x) * data->c + ci];
+			b[m + i] = lambda * data[(texelsFlat[i].y * w + texelsFlat[i].x) * c + ci];
 
 		so_matrix_At_times_b(A, m + n, n, b, Atb, AsparseIndices, 8);
 		so_matrix_cholesky_solve(&L, &Lcols, x, Atb, n);
 
 		// write out results
 		for (int i = 0; i < n; i++)
-			data->data[(texelsFlat[i].y * data->w + texelsFlat[i].x) * data->c + ci] = x[i];
+			data[(texelsFlat[i].y * w + texelsFlat[i].x) * c + ci] = x[i];
 	}
 
 	so_free(memoryBlock);
 	so_sparse_matrix_free(&L);
 	so_sparse_matrix_free(&Lcols);
+
+	return true;
 }
 
-static void so_optimize_seams(float *positions, float *texcoords, int vertices, float *data, int w, int h, int c, float lambda)
-{
-	so_vec3 *pos = (so_vec3*)positions;
-	so_vec2 *uv = (so_vec2*)texcoords;
-
-	so_vec3 bbmin = so_v3(FLT_MAX, FLT_MAX, FLT_MAX);
-	so_vec3 bbmax = so_v3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-	int *hashmap = so_alloc(int, vertices * 2);
-	for (int i = 0; i < vertices; i++)
-	{
-		bbmin = so_min3(bbmin, pos[i]);
-		bbmax = so_max3(bbmax, pos[i]);
-		hashmap[i * 2 + 0] = -1;
-		hashmap[i * 2 + 1] = -1;
-	}
-	
-	so_vec3 bbscale = so_v3(15.9f / bbmax.x, 15.9f / bbmax.y, 15.9f / bbmax.z);
-
-	connected_set_t *connectedSets = 0;
-
-	printf("Searching for sets of stitching points...\n");
-
-	for (int i0 = 0; i0 < vertices; i0++)
-	{
-		int tri = i0 - (i0 % 3);
-		int i1 = tri + ((i0 + 1) % 3);
-		int i2 = tri + ((i0 + 2) % 3);
-		so_vec3 p = so_mul3(so_sub3(pos[i0], bbmin), bbscale);
-		int hash = (281 * (int)p.x + 569 * (int)p.y + 1447 * (int)p.z) % (vertices * 2);
-		while (hashmap[hash] >= 0)
-		{
-			int oi0 = hashmap[hash];
-#define SO_EQUAL(a, b) so_length3sq(so_sub3(pos[a], pos[b])) < 0.0000001f
-			if (SO_EQUAL(oi0, i0))
-			{
-				int otri = oi0 - (oi0 % 3);
-				int oi1 = otri + ((oi0 + 1) % 3);
-				int oi2 = otri + ((oi0 + 2) % 3);
-				if (SO_EQUAL(oi1, i1) && so_should_optimize(pos + tri, pos + otri))
-					so_connected_sets_add_seam(&connectedSets, uv[i0], uv[i1], uv[oi0], uv[oi1], data, w, h, c);
-				//else if (SO_EQUAL(oi1, i2) && so_should_optimize(pos + tri, pos + otri)) // this will already be detected by the other side of the seam!
-				//	so_connected_sets_add_seam(&connectedSets, uv[i0], uv[i2], uv[oi0], uv[oi1], data, w, h, c);
-				else if (SO_EQUAL(oi2, i1) && so_should_optimize(pos + tri, pos + otri))
-					so_connected_sets_add_seam(&connectedSets, uv[i0], uv[i1], uv[oi0], uv[oi2], data, w, h, c);
-				//break;
-			}
-			if (++hash == vertices * 2)
-				hash = 0;
-		}
-		hashmap[hash] = i0;
-	}
-
-	so_free(hashmap);
-
-	int setCount = 0;
-	for (connected_set_t *connectedSet = connectedSets; connectedSet; connectedSet = connectedSet->next)
-		setCount++;
-
-	printf("Solving %d sets of stitching points...\n", setCount);
-
-	so_seams_t seams;
-	seams.lambda = lambda;
-	seams.w = w;
-	seams.h = h;
-	seams.c = c;
-	seams.data = data;
-
-#if 0 //def SO_CPP_THREADS
-	std::thread *threads = new std::thread[connectedSets.size()];
-
-#define SO_THREAD_THRESHOLD 512
-
-	for (int setIndex = 0; setIndex < connectedSets.size(); setIndex++)
-		if (connectedSets[setIndex].stitchingPoints.size() > SO_THREAD_THRESHOLD)
-			threads[setIndex] = std::thread(so_optimize_seam, &seams, setIndex);
-
-	for (int setIndex = 0; setIndex < connectedSets.size(); setIndex++)
-		if (connectedSets[setIndex].stitchingPoints.size() <= SO_THREAD_THRESHOLD)
-			so_optimize_seam(&seams, setIndex);
-
-	for (int setIndex = 0; setIndex < connectedSets.size(); setIndex++)
-		if (connectedSets[setIndex].stitchingPoints.size() > SO_THREAD_THRESHOLD)
-			threads[setIndex].join();
-
-	delete[] threads;
-#else
-	for (connected_set_t *connectedSet = connectedSets; connectedSet; connectedSet = connectedSet->next)
-		so_optimize_seam(&seams, connectedSet);
-#endif
-
-	so_connected_sets_free(&connectedSets);
-
-#ifdef SO_CHECK_FOR_MEMORY_LEAKS
-	assert(so_allocated == 0);
-	printf("allocated max %dMB\n", so_allocated_max / (1024 * 1024));
-	so_allocated_max = 0;
-#endif
-}
+#endif // SEAMOPTIMIZER_IMPLEMENTATION
