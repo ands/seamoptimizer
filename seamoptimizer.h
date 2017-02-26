@@ -2,7 +2,7 @@
 * A single header file lightmap seam optimization library  *
 * https://github.com/ands/seamoptimizer                    *
 * no warranty implied | use at your own risk               *
-* author: Andreas Mantler (ands) | last change: 12.02.2017 *
+* author: Andreas Mantler (ands) | last change: 26.02.2017 *
 *                                                          *
 * License:                                                 *
 * This software is in the public domain.                   *
@@ -14,20 +14,59 @@
 #ifndef SEAMOPTIMIZER_H
 #define SEAMOPTIMIZER_H
 
+#ifndef SO_CALLOC
+#include <malloc.h> // calloc, free, alloca
+#define SO_CALLOC(count, size) calloc(count, size)
+#define SO_FREE(ptr) free(ptr)
+#endif
+
+typedef int so_bool;
+#define SO_FALSE 0
+#define SO_TRUE  1
+
 typedef struct so_seam_t so_seam_t;
 
+// API
+
+// so_seams_find:
+// Find all seams according to the specified triangulated geometry and its texture coordinates.
+// This searches for edges that are shared by triangles, but are disjoint in UV space.
+
+// positions: triangle array 3d positions ((x0, y0, z0), (x1, y1, z1), (x2, y2, z2)), ((x0, y0, z0), (x1, y1, z1), (x2, y2, z2)), ...
+// texcoords: triangle array 2d uv coords (    (u0, v0),     (u1, v1),     (u2, v2)), (    (u0, v0),     (u1, v1),     (u2, v2)), ...
+// vertices: total number of vertices ( = triangles * 3)
+
+// cosNormalThreshold controls at which angles between neighbour triangles a seam should be considered.
+// if dot(triangle A normal, triangle B normal) > cosNormalThreshold then the seam is included into the returned set.
+
+// data, w, h, c specifies the lightmap data (data should be a w * h * c array of floats).
+// w = lightmap width, h = lightmap height, c = number of lightmap channels (1..4).
+
+// returns a linked list of the found seams.
+
+// Warning: The data may be modified to fill empty (zeroed) edge texels with one of their closest neighbours if they are empty!
 so_seam_t *so_seams_find(
-	float *positions, float *texcoords, int vertices, float cosNormalThreshold,
+	float *positions, float *texcoords, int vertices,
+	float cosNormalThreshold,
 	float *data, int w, int h, int c);
 
-bool so_seam_optimize(
+
+// so_seam_optimize:
+// Optimize a single seam. Seams can be optimized in parallel on different threads.
+// lambda: Weight that controls the deviation from the original color values (must be > 0).
+//         Higher values => Less deviation from the original edge colors => more obvious seams.
+//         Too low values => Optimizer may just choose black as the perfect color for all seam pixels.
+// returns whether the optimization was successful.
+so_bool so_seam_optimize(
 	so_seam_t *seam,
 	float *data, int w, int h, int c,
 	float lambda);
 
+// so_seam_next: Retrieves the next seam in the linked list.
 so_seam_t *so_seam_next(
 	so_seam_t *seam);
 
+// so_seams_free: Free the resources for all seams in the list.
 void so_seams_free(
 	so_seam_t *seams);
 
@@ -43,13 +82,6 @@ void so_seams_free(
 #include <math.h>
 #include <float.h>
 #include <assert.h>
-
-#ifndef SO_CALLOC
-#include <malloc.h> // calloc, free, alloca (TODO)
-#define SO_CALLOC calloc
-#define SO_FREE free
-#endif
-
 
 #define SO_EPSILON 0.00001f
 
@@ -101,7 +133,7 @@ static inline float    so_length3sq (so_vec3 a           ) { return a.x * a.x + 
 static inline float    so_length3   (so_vec3 a           ) { return sqrtf(so_length3sq(a)); }
 static inline so_vec3  so_normalize3(so_vec3 a           ) { return so_div3(a, so_length3(a)); }
 
-#define SO_CHECK_FOR_MEMORY_LEAKS // check for memory leaks. don't use this in multithreaded code!
+//#define SO_CHECK_FOR_MEMORY_LEAKS // check for memory leaks. don't use this in multithreaded code!
 
 #ifdef SO_CHECK_FOR_MEMORY_LEAKS
 static uint64_t so_allocated = 0;
@@ -135,9 +167,9 @@ static void so_free(void *memory)
 
 #define so_alloc(type, count) ((type*)so_alloc_void(sizeof(type) * (count)))
 
-static inline bool so_accumulate_texel(float *sums, int x, int y, float *data, int w, int h, int c)
+static inline so_bool so_accumulate_texel(float *sums, int x, int y, float *data, int w, int h, int c)
 {
-	bool exists = false;
+	so_bool exists = SO_FALSE;
 	for (int i = 0; i < c; i++)
 	{
 		float v = data[(y * w + x) * c + i];
@@ -291,16 +323,16 @@ static void so_texel_set_add(so_texel_set_t *set, so_texel_t *texels, int entrie
 	}
 }
 
-static bool so_texel_set_contains(so_texel_set_t *set, so_texel_t texel)
+static so_bool so_texel_set_contains(so_texel_set_t *set, so_texel_t texel)
 {
 	uint32_t hash = so_texel_hash(texel, set->capacity);
 	while (set->texels[hash].x != -1) // entries with same hash
 	{
 		if (set->texels[hash].x == texel.x && set->texels[hash].y == texel.y)
-			return true; // texel is already in the set
+			return SO_TRUE; // texel is already in the set
 		hash = (hash + 1) % set->capacity;
 	}
-	return false;
+	return SO_FALSE;
 }
 
 static void so_texel_set_free(so_texel_set_t *set)
@@ -384,12 +416,12 @@ static void so_seam_add(so_seam_t *seam, so_stitching_point_t *point)
 	so_stitching_points_add(&seam->stitchingPoints, point);
 }
 
-static bool so_seams_intersect(so_seam_t *a, so_seam_t *b)
+static so_bool so_seams_intersect(so_seam_t *a, so_seam_t *b)
 {
 	// compare bounding boxes first
 	if (a->x_min > b->x_max || b->x_min >= a->x_max ||
 		a->y_min > b->y_max || b->y_min >= a->y_max)
-		return false;
+		return SO_FALSE;
 
 	// bounds intersect -> check each individual texel for intersection
 	if (a->texels.capacity > b->texels.capacity) // swap so that we always loop over the smaller set
@@ -402,8 +434,8 @@ static bool so_seams_intersect(so_seam_t *a, so_seam_t *b)
 	for (int i = 0; i < a->texels.capacity; i++)
 		if (a->texels.texels[i].x != -1)
 			if (so_texel_set_contains(&b->texels, a->texels.texels[i]))
-				return true;
-	return false;
+				return SO_TRUE;
+	return SO_FALSE;
 }
 
 static void so_seams_in_place_merge(so_seam_t *dst, so_seam_t *src)
@@ -429,7 +461,7 @@ static void so_seams_add_seam(so_seam_t **seams, so_vec2 a0, so_vec2 a1, so_vec2
 	so_vec2 ad = so_sub2(a1, a0);
 	so_vec2 bd = so_sub2(b1, b0);
 	float l = so_length2(ad);
-	int iterations = (int)(l * 5.0f);
+	int iterations = (int)(l * 5.0f); // TODO: is this the best value?
 	float step = 1.0f / iterations;
 
 	so_seam_t currentSeam = {0};
@@ -689,7 +721,7 @@ static void so_sparse_matrix_sort(so_sparse_entries_t *matrix)
 	qsort(matrix->entries, matrix->count, sizeof(so_sparse_entry_t), so_sparse_entry_cmp);
 }
 
-static bool so_sparse_matrix_advance_to_index(so_sparse_entries_t *matrix, int *position, int index, float *outValue)
+static so_bool so_sparse_matrix_advance_to_index(so_sparse_entries_t *matrix, int *position, int index, float *outValue)
 {
 	int localPosition = *position;
 	while (localPosition < matrix->count && matrix->entries[localPosition].index < index)
@@ -699,10 +731,10 @@ static bool so_sparse_matrix_advance_to_index(so_sparse_entries_t *matrix, int *
 	if (localPosition < matrix->count && matrix->entries[localPosition].index == index)
 	{
 		*outValue = matrix->entries[localPosition].value;
-		return true;
+		return SO_TRUE;
 	}
 
-	return false;
+	return SO_FALSE;
 }
 
 static inline uint32_t so_sparse_entry_hash(int entryIndex, uint32_t capacity)
@@ -826,7 +858,7 @@ static so_sparse_entries_t so_matrix_cholesky_prepare(so_sparse_entries_t *AtA, 
 	//	for (int j = 0; j <= i; j++)
 	//	{
 	//		float *b = L + j * n;
-	//		float sum = A[i * n + j];// +(i == j ? 0.0001 : 0.0); // some regularization
+	//		float sum = A[i * n + j];// + (i == j ? 0.0001 : 0.0); // some regularization
 	//		for (int k = 0; k < j; k++)
 	//			sum -= a[k] * b[k];
 	//		if (i > j)
@@ -834,7 +866,7 @@ static so_sparse_entries_t so_matrix_cholesky_prepare(so_sparse_entries_t *AtA, 
 	//		else // i == j
 	//		{
 	//			if (sum <= 0.0)
-	//				return false;
+	//				return SO_FALSE;
 	//			a[i] = sqrtf(sum);
 	//		}
 	//	}
@@ -928,7 +960,7 @@ static void so_matrix_cholesky_solve(so_sparse_entries_t *Lrows, so_sparse_entri
 	}
 }
 
-bool so_seam_optimize(so_seam_t *seam, float *data, int w, int h, int c, float lambda)
+so_bool so_seam_optimize(so_seam_t *seam, float *data, int w, int h, int c, float lambda)
 {
 	so_texel_set_t *texels = &seam->texels;
 	so_stitching_points_t *stitchingPoints = &seam->stitchingPoints;
@@ -975,7 +1007,7 @@ bool so_seam_optimize(so_seam_t *seam, float *data, int w, int h, int c, float l
 	{
 		ptrdiff_t column0[4];
 		ptrdiff_t column1[4];
-		bool side0valid = false, side1valid = false;
+		so_bool side0valid = SO_FALSE, side1valid = SO_FALSE;
 		for (int k = 0; k < 4; k++)
 		{
 			so_texel_t t0 = stitchingPoints->points[i].sides[0].texels[k];
@@ -983,8 +1015,8 @@ bool so_seam_optimize(so_seam_t *seam, float *data, int w, int h, int c, float l
 			column0[k] = so_texel_binary_search(texelsFlat, n, t0);
 			column1[k] = so_texel_binary_search(texelsFlat, n, t1);
 
-			if (column0[k] == -1) { side0valid = false; break; }
-			if (column1[k] == -1) { side1valid = false; break; }
+			if (column0[k] == -1) { side0valid = SO_FALSE; break; }
+			if (column1[k] == -1) { side1valid = SO_FALSE; break; }
 
 			// test for validity of stitching point
 			for (int ci = 0; ci < c; ci++)
@@ -1024,7 +1056,7 @@ bool so_seam_optimize(so_seam_t *seam, float *data, int w, int h, int c, float l
 	if (!L.count)
 	{
 		so_free(memoryBlock);
-		return false; // Cholesky decomposition failed
+		return SO_FALSE; // Cholesky decomposition failed
 	}
 
 	so_sparse_entries_t Lcols;
@@ -1051,7 +1083,7 @@ bool so_seam_optimize(so_seam_t *seam, float *data, int w, int h, int c, float l
 	so_sparse_matrix_free(&L);
 	so_sparse_matrix_free(&Lcols);
 
-	return true;
+	return SO_TRUE;
 }
 
 #endif // SEAMOPTIMIZER_IMPLEMENTATION
