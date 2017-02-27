@@ -15,6 +15,7 @@ Before optimizing a very bad UV mapping (each triangle edge is a seam):
 ![Sean Optimizer Before](https://github.com/ands/seamoptimizer/raw/master/example_images/stairs_triangles_not_optimized.png)
 After optimizing the seams of the bad UV mapping:
 ![Sean Optimizer After](https://github.com/ands/seamoptimizer/raw/master/example_images/stairs_triangles_optimized.png)
+The seams are not all completely gone, but, especially on the walls there is a very noticeable improvement.
 
 # Example Usage
 The following example finds and optimizes all the seams for some mesh geometry on a lightmap.
