@@ -1,6 +1,6 @@
 # seamoptimizer
 A C/C++ single-file library that minimizes the hard transition errors of disjoint edges in lightmaps.
-It is based on a idea presented by Michał Iwanicki in the talk ![Lighting Technology of "The Last Of Us"](http://miciwan.com/SIGGRAPH2013/Lighting%20Technology%20of%20The%20Last%20Of%20Us.pdf).
+It is based on a idea presented by Michał Iwanicki in the talk [Lighting Technology of "The Last Of Us"](http://miciwan.com/SIGGRAPH2013/Lighting%20Technology%20of%20The%20Last%20Of%20Us.pdf).
 A least squares solver is used to find a minimal error solution to the problem of sampling along the edges between triangles that are mapped with disjoint lightmap regions.
 This can improve the visual appearance at these discontinuities or "seams".
 
@@ -12,9 +12,9 @@ To paste the implementation into your project, insert the following lines:
 ```
 
 Before optimizing a very bad UV mapping (each triangle edge is a seam):
-![Sean Optimizer Before](https://github.com/ands/seamoptimizer/raw/master/example_images/city_triangles_not_optimized.png)
+![Sean Optimizer Before](https://github.com/ands/seamoptimizer/raw/master/example_images/stairs_triangles_not_optimized.png)
 After optimizing the seams of the bad UV mapping:
-![Sean Optimizer After](https://github.com/ands/seamoptimizer/raw/master/example_images/city_triangles_optimized.png)
+![Sean Optimizer After](https://github.com/ands/seamoptimizer/raw/master/example_images/stairs_triangles_optimized.png)
 
 # Example Usage
 The following example finds and optimizes all the seams for some mesh geometry on a lightmap.
