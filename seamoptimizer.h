@@ -2,7 +2,7 @@
 * A single header file lightmap seam optimization library  *
 * https://github.com/ands/seamoptimizer                    *
 * no warranty implied | use at your own risk               *
-* author: Andreas Mantler (ands) | last change: 26.02.2017 *
+* author: Andreas Mantler (ands) | last change: 05.03.2017 *
 *                                                          *
 * License:                                                 *
 * This software is in the public domain.                   *
@@ -157,7 +157,7 @@ static void so_free(void *memory)
 #else
 static void *so_alloc_void(size_t size)
 {
-	return SO_CALLOC(1, size + sizeof(size_t));
+	return SO_CALLOC(1, size);
 }
 static void so_free(void *memory)
 {
