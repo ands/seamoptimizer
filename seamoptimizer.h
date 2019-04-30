@@ -105,6 +105,8 @@ static inline float so_rsqrtf(float v)
 }
 #endif
 
+static inline int16_t  so_min16i    (int16_t a, int16_t b) { return a < b ? a : b; }
+static inline int16_t  so_max16i    (int16_t a, int16_t b) { return a > b ? a : b; }
 static inline float    so_minf      (float   a, float   b) { return a < b ? a : b; }
 static inline float    so_maxf      (float   a, float   b) { return a > b ? a : b; }
 static inline float    so_absf      (float   a           ) { return a < 0.0f ? -a : a; }
@@ -480,15 +482,15 @@ static void so_seams_add_seam(so_seam_t **seams, so_vec2 a0, so_vec2 a1, so_vec2
 		float au = a.x - ax, av = a.y - ay, nau = 1.0f - au, nav = 1.0f - av;
 		float bu = b.x - bx, bv = b.y - by, nbu = 1.0f - bu, nbv = 1.0f - bv;
 
-		so_texel_t ta0 = { ax    , ay     };
-		so_texel_t ta1 = { ax + 1, ay     };
-		so_texel_t ta2 = { ax    , ay + 1 };
-		so_texel_t ta3 = { ax + 1, ay + 1 };
+		so_texel_t ta0 = { ax                      , ay                       };
+		so_texel_t ta1 = { so_min16i(ax + 1, w - 1), ay                       };
+		so_texel_t ta2 = { ax                      , so_min16i(ay + 1, h - 1) };
+		so_texel_t ta3 = { so_min16i(ax + 1, w - 1), so_min16i(ay + 1, h - 1) };
 
-		so_texel_t tb0 = { bx    , by     };
-		so_texel_t tb1 = { bx + 1, by     };
-		so_texel_t tb2 = { bx    , by + 1 };
-		so_texel_t tb3 = { bx + 1, by + 1 };
+		so_texel_t tb0 = { bx                      , by                       };
+		so_texel_t tb1 = { so_min16i(bx + 1, w - 1), by                       };
+		so_texel_t tb2 = { bx                      , so_min16i(by + 1, h - 1) };
+		so_texel_t tb3 = { so_min16i(bx + 1, w - 1), so_min16i(by + 1, h - 1) };
 
 		so_fill_with_closest(ta0.x, ta0.y, data, w, h, c);
 		so_fill_with_closest(ta1.x, ta1.y, data, w, h, c);
