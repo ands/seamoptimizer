@@ -873,9 +873,22 @@ static so_sparse_entries_t so_matrix_cholesky_prepare(so_sparse_entries_t *AtA, 
 	//}
 	
 	// sparse
-	int *indices_i = (int*)alloca(sizeof(int) * n);
-	float *row_i = (float*)alloca(sizeof(float) * n);
-	float *invDiag = (float*)alloca(sizeof(float) * n);
+	int *indices_i;
+	float *row_i;
+	float *invDiag;
+
+	if (n > 4096)
+	{
+		indices_i = so_alloc(int, n);
+		row_i = so_alloc(float, n);
+		invDiag = so_alloc(float, n);
+	}
+	else
+	{
+		indices_i = (int*)alloca(sizeof(int) * n);
+		row_i = (float*)alloca(sizeof(float) * n);
+		invDiag = (float*)alloca(sizeof(float) * n);
+	}
 
 	so_sparse_entries_t L;
 	so_sparse_matrix_alloc(&L, (n / 16) * (n / 16));
@@ -920,6 +933,13 @@ static so_sparse_entries_t so_matrix_cholesky_prepare(so_sparse_entries_t *AtA, 
 			else
 				row_i[j] = 0.0f;
 		}
+	}
+
+	if (n > 4096)
+	{
+		so_free(indices_i);
+		so_free(row_i);
+		so_free(invDiag);
 	}
 
 	return L;
