@@ -466,6 +466,10 @@ static void so_seams_add_seam(so_seam_t **seams, so_vec2 a0, so_vec2 a1, so_vec2
 	int iterations = (int)(l * 5.0f); // TODO: is this the best value?
 	float step = 1.0f / iterations;
 
+	if (iterations == 0) {
+		step = 0.0;
+	}
+
 	so_seam_t currentSeam = {0};
 	currentSeam.x_min = w; currentSeam.y_min = h;
 	currentSeam.x_max = 0; currentSeam.y_max = 0;
